@@ -280,6 +280,23 @@ class PolynomRegressor(BaseEstimator):
                 constraints.append(second_derivative <= -1e-2)
                 
         return constraints
+    
+    def build_range_constraint(self, coeffs, constraint_range, prediction_range, \
+                               column_norms):
+        
+        constraints = []
+        
+        for x in constraint_range:
+            
+            vanderx = self.vander(np.array([x]))
+            vanderx = vanderx.ravel()/column_norms
+            
+            prediction = cv.sum(cv.multiply(vanderx, coeffs))
+            
+            constraints.append(prediction >= prediction_range[0])
+            constraints.append(prediction <= prediction_range[1])
+            
+        return constraints
 
     def cvx_solve(self, problem, coeffs, loss, verbose):
         print("loss: ", loss)
@@ -335,20 +352,29 @@ class PolynomRegressor(BaseEstimator):
         
     def fit(self, x, y, loss = 'l2', m = 1, constraint_range = None, yrange = None, verbose = False):
         
+        if constraint_range is None:
+            
+            constraint_range = [np.amin(x), np.amax(x)]
+        
+
         vander = self.vander(x)
         column_norms = self.column_norms(vander)
         
         objective, coeffs = self.build_objective(x, y, loss, m)
-        problem = cv.Problem(objective)
+        
+        constraints = []
+        if yrange is not None:
+            
+            y_constraints = self.build_range_constraint(coeffs, constraint_range, yrange, column_norms)
+            constraints = constraints + y_constraints
+            
+        problem = cv.Problem(objective, constraints)
         problem.solve()
         unscaled_coeffs = coeffs.value
         rescaled_coeffs = unscaled_coeffs/column_norms
         #problem, coeffs = self.cvx_solve(problem, coeffs, loss, verbose)
         
-        if constraint_range is None:
-            
-            constraint_range = [np.amin(x), np.amax(x)]
-        
+
         if self.curvature is None:
             
             curvature = True
@@ -360,15 +386,15 @@ class PolynomRegressor(BaseEstimator):
             print("initial hesse root: ", hesse_roots)
             while monotonic == False or curvature == False:
                 
-                print("monotonic: ", monotonic)
-                print("derivative roots: ", gradient_roots)
+                #print("monotonic: ", monotonic)
+                #print("derivative roots: ", gradient_roots)
                 #print("current coefs: ", coeffs.value)
-                print("curvature: ", curvature)
-                print("hesse rots: ", hesse_roots)
+                #print("curvature: ", curvature)
+                #print("hesse rots: ", hesse_roots)
                 #time.sleep(0.25)
                 monotonic_constraints = self.build_monotonic_constraints(coeffs, gradient_roots, column_norms)
                 curvature_constraints = self.build_curvature_constraints(coeffs, hesse_roots, column_norms)
-                constraints = monotonic_constraints + curvature_constraints
+                constraints = y_constraints + monotonic_constraints + curvature_constraints
                 #print(constraints)
                 problem = cv.Problem(objective, constraints = constraints)
                 #print(problem)
@@ -391,21 +417,19 @@ class PolynomRegressor(BaseEstimator):
 npzfile = np.load('/home/tyrion/Development/Polyfit/polyfit/Example_Data.npz')
 x = npzfile['X']
 y = npzfile['y']
-print(x.dtype)
-print(y.dtype)
 x_plot = np.linspace(0, 100, 500)    
-DEG = 2
+DEG = 7
 VERBOSE = False
 datarange=[0, 1]
 
 np_coeffs = np.polyfit(x, y, DEG)
 #der_coeffs = np.
 print("np: ", np_coeffs)
-polyestimator = PolynomRegressor(deg=DEG, monotonocity='positive', regularization = 'l1', lam = 1e-6)#, curvature='concave')
+polyestimator = PolynomRegressor(deg=DEG, monotonocity='positive')#, curvature='concave')
 vander = polyestimator.vander(x_plot)
 pred_numpy = vander@np_coeffs[::-1]
 
-polyestimator.fit(x, y, loss = 'l1', constraint_range=[0, 100], verbose = False) 
+polyestimator.fit(x, y, loss = 'l1', m = 0.05, yrange = [0,1], verbose = False) #, 
 pred = polyestimator.predict(x_plot)
 
 import matplotlib.pyplot as plt
