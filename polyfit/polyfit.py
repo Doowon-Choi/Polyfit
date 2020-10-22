@@ -25,7 +25,7 @@ class PolynomRegressor(BaseEstimator):
     
     def __init__(self, deg=None, monotonocity = None, curvature = None, \
                  positive_coeffs = False, negative_coeffs = False, \
-                     regularization = None, lam = 0):
+                     regularization = None, lam = 0, eps = 1e-4):
         
         self.deg = deg
         self.monotonocity = monotonocity
@@ -35,7 +35,8 @@ class PolynomRegressor(BaseEstimator):
         self.negative_coeffs = negative_coeffs
         self.regularization = regularization
         self.lam = lam
-    
+        self.eps = eps
+        
     def column_norms(self, V):
         
         norms = np.sqrt(np.square(V).sum(0))
@@ -240,44 +241,48 @@ class PolynomRegressor(BaseEstimator):
 
         return objective, coeffs        
     
-    def build_monotonic_constraints(self, coeffs, roots, column_norms):
+    def build_monotonic_constraints(self, coeffs, constraint_range, roots, column_norms, eps):
         
         constraints = []
-        
+        if roots is None or roots.size == 0:
+            
+            return constraints
+                
         #vandergrad = self.vander_grad(roots)
-        for root in roots:
+        all_points = constraint_range + roots.tolist()
+        for point in all_points:
             #print("constraint for root: ", root)
-            vandergrad = self.vander_grad(np.array([root]))
+            vandergrad = self.vander_grad(np.array([point]))
             vandergrad = vandergrad.ravel()/column_norms
             derivative = cv.sum(cv.multiply(vandergrad, coeffs))
             
             if self.monotonocity == 'positive':
-                constraints.append(derivative >= 1e-3)
+                constraints.append(derivative >= eps)
             
             elif self.monotonocity == 'negative':
-                constraints.append(derivative <= -1e-3)
+                constraints.append(derivative <= -eps)
                 
         return constraints
     
-    def build_curvature_constraints(self, coeffs, roots, column_norms):
+    def build_curvature_constraints(self, coeffs, constraint_range, roots, column_norms, eps):
         
         constraints = []
-        if roots is None:
+        if roots is None or roots.size == 0:
             
             return constraints
-        
-        #vandergrad = self.vander_grad(roots)
-        for root in roots:
+        #print("roots: ", roots)
+        all_points = constraint_range + roots.tolist()
+        for point in all_points:
             #print("constraint for root: ", root)
-            vanderhesse = self.vander_hesse(np.array([root]))
+            vanderhesse = self.vander_hesse(np.array([point]))
             vanderhesse = vanderhesse.ravel()/column_norms
             second_derivative = cv.sum(cv.multiply(vanderhesse, coeffs))
             
             if self.curvature == 'convex':
-                constraints.append(second_derivative >= 1e-2)
+                constraints.append(second_derivative >= eps)
             
             elif self.curvature == 'concave':
-                constraints.append(second_derivative <= -1e-2)
+                constraints.append(second_derivative <= -1 * eps)
                 
         return constraints
     
@@ -350,7 +355,7 @@ class PolynomRegressor(BaseEstimator):
 
             #self.coeffs_ = coefficients        
         
-    def fit(self, x, y, loss = 'l2', m = 1, constraint_range = None, yrange = None, verbose = False):
+    def fit(self, x, y, loss = 'l2', m = 1, constraint_range = None, yrange = None, eps = 1e-5, verbose = False):
         
         if constraint_range is None:
             
@@ -367,7 +372,9 @@ class PolynomRegressor(BaseEstimator):
             
             y_constraints = self.build_range_constraint(coeffs, constraint_range, yrange, column_norms)
             constraints = constraints + y_constraints
-            
+        
+        else:
+            y_constraints = []
         problem = cv.Problem(objective, constraints)
         problem.solve()
         unscaled_coeffs = coeffs.value
@@ -382,31 +389,54 @@ class PolynomRegressor(BaseEstimator):
         if self.monotonocity is not None:
             
             gradient_roots, monotonic = self.check_monotonicity(rescaled_coeffs, constraint_range)
-            hesse_roots, curva = self.check_curvature(rescaled_coeffs, constraint_range)
-            print("initial hesse root: ", hesse_roots)
-            while monotonic == False or curvature == False:
+            hesse_roots, curvature = self.check_curvature(rescaled_coeffs, constraint_range)
+            
+            #first only monotonicity with high tolerance
+            while monotonic == False :
                 
-                #print("monotonic: ", monotonic)
-                #print("derivative roots: ", gradient_roots)
-                #print("current coefs: ", coeffs.value)
-                #print("curvature: ", curvature)
-                #print("hesse rots: ", hesse_roots)
-                #time.sleep(0.25)
-                monotonic_constraints = self.build_monotonic_constraints(coeffs, gradient_roots, column_norms)
-                curvature_constraints = self.build_curvature_constraints(coeffs, hesse_roots, column_norms)
-                constraints = y_constraints + monotonic_constraints + curvature_constraints
-                #print(constraints)
+                print("derivative roots: ", gradient_roots)
+                monotonic_constraints = self.build_monotonic_constraints(coeffs, constraint_range, gradient_roots, column_norms, eps=eps)
+                constraints = y_constraints + monotonic_constraints# + curvature_constraints
                 problem = cv.Problem(objective, constraints = constraints)
-                #print(problem)
-                problem.solve(verbose = True)#eps_abs=1e-10, eps_rel=1e-10, max_iter=10000000, \
+                problem.solve()#eps_abs=1e-10, eps_rel=1e-10, max_iter=10000000, \
                               #eps_prim_inf = 1e-10, eps_dual_inf = 1e-10, verbose = verbose)
                 unscaled_coeffs = coeffs.value
                 rescaled_coeffs = unscaled_coeffs/column_norms
-                #problem, coeffs = self.cvx_solve(problem, coeffs, loss, verbose)
-                
                 gradient_roots, monotonic = self.check_monotonicity(rescaled_coeffs, constraint_range)
-                #hesse_roots, curvature = self.check_curvature(rescaled_coeffs, constraint_range)
-    
+            
+            if self.curvature is not None:
+                
+                #now with curvature constraints
+                gradient_roots, monotonic = self.check_monotonicity(rescaled_coeffs, constraint_range)
+                hesse_roots, curvature = self.check_curvature(rescaled_coeffs, constraint_range)
+                print("curvature: ", curvature)
+                while monotonic == False or curvature == False:
+                    
+                    #print("monotonic: ", monotonic)
+                    #print("derivative roots: ", gradient_roots)
+                    #print("current coefs: ", coeffs.value)
+                    print("curvature: ", curvature)
+                    #print("hesse rots: ", hesse_roots)
+                    #time.sleep(0.25)
+                    monotonic_constraints = self.build_monotonic_constraints(coeffs, constraint_range, gradient_roots, column_norms, eps)
+                    curvature_constraints = self.build_curvature_constraints(coeffs, constraint_range, hesse_roots, column_norms, 0.01 * eps)
+                    constraints = y_constraints + monotonic_constraints + curvature_constraints
+                    #print(constraints)
+                    problem = cv.Problem(objective, constraints = constraints)
+                    #print(problem)
+                    problem.solve()#eps_abs=1e-10, eps_rel=1e-10, max_iter=10000000, \
+                                  #eps_prim_inf = 1e-10, eps_dual_inf = 1e-10, verbose = verbose)
+                    #problem.solve(abstol=1e-9, reltol=1e-9, max_iters=1000000, \
+                    #          feastol=1e-9, abstol_inacc = 1e-7, \
+                    #              reltol_inacc=1e-7, verbose = verbose) 
+                    unscaled_coeffs = coeffs.value
+                    rescaled_coeffs = unscaled_coeffs/column_norms
+                    #print("coefficiens: ", rescaled_coeffs)
+                    #problem, coeffs = self.cvx_solve(problem, coeffs, loss, verbose)
+                    
+                    gradient_roots, monotonic = self.check_monotonicity(rescaled_coeffs, constraint_range)
+                    hesse_roots, curvature = self.check_curvature(rescaled_coeffs, constraint_range)
+            
         #rescaled_coeffs = coeffs/column_norms
         print("cvx solution: ", rescaled_coeffs)
         #print("hesse root: ", hesse_roots)
@@ -414,35 +444,58 @@ class PolynomRegressor(BaseEstimator):
         
         return self
 
+
 npzfile = np.load('/home/tyrion/Development/Polyfit/polyfit/Example_Data.npz')
 x = npzfile['X']
 y = npzfile['y']
 x_plot = np.linspace(0, 100, 500)    
-DEG = 7
+DEG = 5
 VERBOSE = False
 datarange=[0, 1]
 
 np_coeffs = np.polyfit(x, y, DEG)
 #der_coeffs = np.
 print("np: ", np_coeffs)
-polyestimator = PolynomRegressor(deg=DEG, monotonocity='positive')#, curvature='concave')
+polyestimator = PolynomRegressor(deg=DEG,monotonocity='positive')#eps=1e-7) regularization = 'l2', lam=1e-3, 
 vander = polyestimator.vander(x_plot)
-pred_numpy = vander@np_coeffs[::-1]
+pred_np = vander@np_coeffs[::-1]
 
-polyestimator.fit(x, y, loss = 'l1', m = 0.05, yrange = [0,1], verbose = False) #, 
+polyestimator.fit(x, y, loss = 'l1', m = 0.1, yrange=[0, 1], verbose = False, eps=1e-6)#
 pred = polyestimator.predict(x_plot)
+'''
+DEG = 3
+def polynom(x):
+    
+    return 0.5 * x**2 -5 * x -0.05 * x**3
 
+x = np.random.uniform(-5, 15, 30)
+y = polynom(x)
+y = np.random.normal(y, 40)
+
+x_plot = np.linspace(-10, 20, 100)
+y_true = polynom(x_plot)
+
+np_coeffs = np.polyfit(x, y, DEG)
+
+polyestimator = PolynomRegressor(DEG)
+polyestimator.coeffs_ = np_coeffs[::-1]
+pred_np = polyestimator.predict(x_plot)
+
+polyestimator = PolynomRegressor(DEG, monotonocity='negative')
+polyestimator.fit(x, y, eps=1e-3)
+pred = polyestimator.predict(x_plot)
+'''
 import matplotlib.pyplot as plt
 
 f, ax = plt.subplots(1, figsize = (10, 5))
 ax.set_xlim(np.amin(x_plot), np.amax(x_plot))
-ax.set_ylim(0, 1.1)
+#ax.set_ylim(0, 1.1)
 
 ax.scatter(x, y, c='k', s=8)
-
-ax.plot(x_plot, pred_numpy, c='r', label='Deg: 5 /Numpy Polyfit')
+#ax.plot(x_plot, y_true, c='k')
+ax.plot(x_plot, pred_np, c='r', label='Numpy Polyfit')
 ax.plot(x_plot, pred, c='b', label='Polyfit')
-ax.legend(loc='upper left', frameon=False)
+#ax.legend(loc='upper left', frameon=False)
 plt.subplots_adjust(top=0.99,
 bottom=0.06,
 left=0.05,
